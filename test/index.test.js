@@ -155,3 +155,15 @@ test("rejects NUL-containing files", async (t) => {
   );
   assert.equal(input.systemPromptOptions.contextFiles[0].content, "@./binary.dat");
 });
+
+test("leaves virtual context without active references untouched", async (t) => {
+  const root = await temp(t);
+  const path = join(root, "missing", "virtual.md");
+  const content = "```text\n@./not-a-reference.md\n```\n";
+  const input = event(root, [{ path, content }]);
+
+  await extension().before_agent_start(input, { hasUI: false });
+
+  assert.equal(input.systemPromptOptions.contextFiles[0].content, content);
+  assert.equal(input.systemPromptOptions.sections["pi-ref-error"], undefined);
+});

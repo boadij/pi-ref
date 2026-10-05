@@ -26,8 +26,8 @@ async function expand(
   sourcePath: string,
   content: string,
   stack: string[],
-  boundary: string,
-  allowExternal: (target: string) => Promise<void>,
+  getRoot: () => Promise<string>,
+  allowTarget: (target: string) => Promise<void>,
 ): Promise<string> {
   let result = "";
   let fence: { marker: "`" | "~"; length: number } | undefined;
@@ -58,8 +58,8 @@ async function expand(
         canonical = await realpath(target);
         const info = await stat(canonical);
         if (!info.isFile()) throw new Error("not a regular file");
-        if (!contains(boundary, canonical)) await allowExternal(canonical);
-        if (stack.includes(canonical)) {
+        await allowTarget(canonical);
+        if (stack.includes(canonical) || canonical === await getRoot()) {
           throw new Error(`pi-ref: reference cycle at ${canonical}`);
         }
         const bytes = await readFile(canonical);
@@ -78,8 +78,8 @@ async function expand(
         resolveRef(sourcePath, input),
         included,
         [...stack, canonical],
-        boundary,
-        allowExternal,
+        getRoot,
+        allowTarget,
       );
       result += expanded;
       if (eol && !/[\r\n]$/u.test(expanded)) result += eol;
@@ -109,10 +109,15 @@ export default function piRef(pi: ExtensionAPI): void {
         const sourcePath = isAbsolute(file.path)
           ? file.path
           : resolve(cwd, file.path);
-        const boundary = await realpath(dirname(sourcePath));
-        const root = await realpath(sourcePath).catch(() => sourcePath);
-        const allowExternal = async (target: string) => {
-          if (approvedExternalRoots.has(root)) return;
+        let boundary: Promise<string | undefined> | undefined;
+        const getBoundary = () => boundary ??= realpath(dirname(sourcePath)).catch(() => undefined);
+        let root: Promise<string> | undefined;
+        const getRoot = () => root ??= realpath(sourcePath).catch(() => sourcePath);
+        const allowTarget = async (target: string) => {
+          const canonicalBoundary = await getBoundary();
+          if (canonicalBoundary && contains(canonicalBoundary, target)) return;
+          const rootKey = await getRoot();
+          if (approvedExternalRoots.has(rootKey)) return;
           if (!ctx.hasUI) {
             throw new Error(
               `pi-ref: external reference requires interactive approval: ${target}`,
@@ -120,15 +125,14 @@ export default function piRef(pi: ExtensionAPI): void {
           }
           const approved = await ctx.ui.confirm(
             "External context reference",
-            `pi-ref wants to read files outside:\n\n${boundary}\n\nFirst external reference:\n${target}\n\nAllow external references from this context file for this session?`,
+            `pi-ref wants to read files outside:\n\n${canonicalBoundary ?? dirname(sourcePath)}\n\nFirst external reference:\n${target}\n\nAllow external references from this context file for this session?`,
           );
           if (!approved) throw new Error(`pi-ref: external reference denied: ${target}`);
-          approvedExternalRoots.add(root);
+          approvedExternalRoots.add(rootKey);
         };
 
-        const stack = [root];
         expanded.push(
-          await expand(sourcePath, file.content, stack, boundary, allowExternal),
+          await expand(sourcePath, file.content, [], getRoot, allowTarget),
         );
       }
 
