@@ -29,7 +29,7 @@ Referenced files may include references of their own. Cycles are rejected; dupli
 @./rules/backend.md
 ```
 
-`rules/backend.md` may itself contain `@../shared/types.md`.
+`rules/backend.md` may itself contain `@../shared/types.md`. Nested references resolve relative to the imported file that contains them, not the root context file.
 
 ## External files
 
