@@ -1,0 +1,41 @@
+{
+  "name": "pi-ref",
+  "version": "0.1.0",
+  "description": "Expand local file references in Pi context files.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "boadij",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/boadij/pi-ref.git"
+  },
+  "homepage": "https://github.com/boadij/pi-ref#readme",
+  "bugs": {
+    "url": "https://github.com/boadij/pi-ref/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "pi-coding-agent",
+    "coding-agent",
+    "context-management",
+    "agents-md",
+    "file-references",
+    "markdown"
+  ],
+  "files": [
+    "extensions/"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --test"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
