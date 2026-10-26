@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
@@ -100,42 +100,42 @@ export default function piRef(pi: ExtensionAPI): void {
   const approvedExternalRoots = new Set<string>();
   pi.on("session_start", () => approvedExternalRoots.clear());
 
+  async function expandRoot(sourcePath: string, content: string, ctx: ExtensionContext): Promise<string> {
+    let boundary: Promise<string | undefined> | undefined;
+    const getBoundary = () => boundary ??= realpath(dirname(sourcePath)).catch(() => undefined);
+    let root: Promise<string> | undefined;
+    const getRoot = () => root ??= realpath(sourcePath).catch(() => sourcePath);
+    const allowTarget = async (target: string) => {
+      const canonicalBoundary = await getBoundary();
+      if (canonicalBoundary && contains(canonicalBoundary, target)) return;
+      const rootKey = await getRoot();
+      if (approvedExternalRoots.has(rootKey)) return;
+      if (!ctx.hasUI) {
+        throw new Error(`pi-ref: external reference requires interactive approval: ${target}`);
+      }
+      const approved = await ctx.ui.confirm(
+        "External file reference",
+        `pi-ref wants to read files outside:\n\n${canonicalBoundary ?? dirname(sourcePath)}\n\nFirst external reference:\n${target}\n\nAllow external references from this file for this session?`,
+      );
+      if (!approved) throw new Error(`pi-ref: external reference denied: ${target}`);
+      approvedExternalRoots.add(rootKey);
+    };
+    return expand(sourcePath, content, [], getRoot, allowTarget);
+  }
+
+  // Pi owns skill discovery and native /skill:name expansion.
+  const skillPaths = () => pi.getCommands()
+    .filter((command) => command.source === "skill")
+    .map((command) => ({ name: command.name.slice(6), path: command.sourceInfo.path }));
+
   pi.on("before_agent_start", async (event, ctx) => {
     try {
       const cwd = event.systemPromptOptions.cwd;
       const expanded: string[] = [];
-
       for (const file of event.systemPromptOptions.contextFiles) {
-        const sourcePath = isAbsolute(file.path)
-          ? file.path
-          : resolve(cwd, file.path);
-        let boundary: Promise<string | undefined> | undefined;
-        const getBoundary = () => boundary ??= realpath(dirname(sourcePath)).catch(() => undefined);
-        let root: Promise<string> | undefined;
-        const getRoot = () => root ??= realpath(sourcePath).catch(() => sourcePath);
-        const allowTarget = async (target: string) => {
-          const canonicalBoundary = await getBoundary();
-          if (canonicalBoundary && contains(canonicalBoundary, target)) return;
-          const rootKey = await getRoot();
-          if (approvedExternalRoots.has(rootKey)) return;
-          if (!ctx.hasUI) {
-            throw new Error(
-              `pi-ref: external reference requires interactive approval: ${target}`,
-            );
-          }
-          const approved = await ctx.ui.confirm(
-            "External context reference",
-            `pi-ref wants to read files outside:\n\n${canonicalBoundary ?? dirname(sourcePath)}\n\nFirst external reference:\n${target}\n\nAllow external references from this context file for this session?`,
-          );
-          if (!approved) throw new Error(`pi-ref: external reference denied: ${target}`);
-          approvedExternalRoots.add(rootKey);
-        };
-
-        expanded.push(
-          await expand(sourcePath, file.content, [], getRoot, allowTarget),
-        );
+        const sourcePath = isAbsolute(file.path) ? file.path : resolve(cwd, file.path);
+        expanded.push(await expandRoot(sourcePath, file.content, ctx));
       }
-
       for (let i = 0; i < expanded.length; i++) {
         event.systemPromptOptions.contextFiles[i]!.content = expanded[i]!;
       }
@@ -145,5 +145,49 @@ export default function piRef(pi: ExtensionAPI): void {
         `Reference expansion failed; referenced context was not loaded.\n${message}`;
       throw error;
     }
+  });
+
+  pi.on("message_end", async (event, ctx) => {
+    if (event.message.role !== "user") return;
+    const [block] = event.message.content;
+    if (block?.type !== "text") return;
+    // Pi's native skill wrapper is already present; only rewrite its body, never user arguments.
+    const match = block.text.match(/^(<skill name="([^"]+)" location="([^"]+)">\nReferences are relative to [^\n]*\.\n\n)([\s\S]*?)(\n<\/skill>(?:\n\n[\s\S]+)?)$/u);
+    if (!match) return;
+    const [, prefix, name, path, body, suffix] = match;
+    if (!skillPaths().some((skill) => skill.name === name && resolve(ctx.cwd, skill.path) === resolve(ctx.cwd, path!))) return;
+    let text: string;
+    try {
+      const expanded = await expandRoot(resolve(ctx.cwd, path!), body!, ctx);
+      if (expanded === body) return;
+      text = prefix! + expanded + suffix!;
+    } catch (error) {
+      text = `pi-ref: skill reference expansion failed; skill instructions were not loaded.\n${error instanceof Error ? error.message : String(error)}`;
+    }
+    return { message: { ...event.message, content: [{ ...block, text }, ...event.message.content.slice(1)] } };
+  });
+
+  pi.on("tool_result", async (event, ctx) => {
+    if (event.toolName !== "read" || event.isError || event.input.offset != null || event.input.limit != null || (event.details && typeof event.details === "object" && "truncation" in event.details)) return;
+    const [block] = event.content;
+    if (block?.type !== "text" || (event.structuredContent != null && typeof event.structuredContent !== "string")) return;
+    const inputPath = event.input.path;
+    if (typeof inputPath !== "string") return;
+    const sourcePath = resolve(ctx.cwd, inputPath);
+    if (!skillPaths().some((skill) => resolve(ctx.cwd, skill.path) === sourcePath)) return;
+    let text: string;
+    let isError = false;
+    try {
+      text = await expandRoot(sourcePath, block.text, ctx);
+      if (text === block.text) return;
+    } catch (error) {
+      isError = true;
+      text = `pi-ref: skill reference expansion failed; skill instructions were not loaded.\n${error instanceof Error ? error.message : String(error)}`;
+    }
+    return {
+      content: [{ ...block, text }],
+      ...(event.structuredContent === undefined ? {} : { structuredContent: text }),
+      ...(isError ? { isError: true } : {}),
+    };
   });
 }
