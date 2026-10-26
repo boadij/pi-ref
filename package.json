@@ -1,6 +1,6 @@
 {
   "name": "pi-ref",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Expand local file references in Pi context and skill files.",
   "type": "module",
   "license": "Apache-2.0",
